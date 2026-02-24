@@ -6,21 +6,22 @@ import qrcode from "qrcode-terminal";
 
 import makeWASocket, {
   useMultiFileAuthState,
-  DisconnectReason
+  DisconnectReason,
+  fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
 import { createOpenAI } from "./openaiClient.js";
 import { createSalesAgent } from "./salesAgent.js";
 
-const PORT = Number(process.env.PORT ?? 3030);
+const PORT = Number(process.env.PORT ?? 3040);
 const BOT_NAME = process.env.BOT_NAME ?? "SweetBot";
 const COMPANY_NAME = process.env.COMPANY_NAME ?? "My Sweet Time";
 
 /**
- * Reset configurable por inactividad:
+ * ✅ Reset configurable por inactividad
  * Preferido: RESET_AFTER_MINUTES
  * Fallback: RESET_AFTER_HOURS
- * Default: 180 min
+ * Default: 180 minutos
  */
 const RESET_AFTER_MINUTES = process.env.RESET_AFTER_MINUTES
   ? Number(process.env.RESET_AFTER_MINUTES)
@@ -28,7 +29,13 @@ const RESET_AFTER_MINUTES = process.env.RESET_AFTER_MINUTES
 
 const RESET_AFTER_MS = Math.max(1, RESET_AFTER_MINUTES) * 60 * 1000;
 
-// Server HTTP (para healthcheck)
+// ✅ Handoff / humano
+const HUMAN_PHONE_E164 = (process.env.HUMAN_PHONE_E164 ?? "").trim(); // 50672844010
+const ADMIN_JIDS = (process.env.ADMIN_JIDS ?? "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const app = express();
 app.get("/", (_req, res) => res.send("✅ WA Bot ON"));
 app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT}`));
@@ -36,17 +43,16 @@ app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT
 const logger = pino({ level: "silent" });
 
 // Memoria por usuario (RAM)
-const memoryStore = new Map();
-const lastSeenStore = new Map();
+const memoryStore = new Map();    // userId -> [{role, content}, ...]
+const lastSeenStore = new Map();  // userId -> timestamp (ms)
+const languageStore = new Map();  // userId -> {lang, streak, lastCandidate}
 
-// Idioma por usuario (si tu salesAgent usa esto)
-const languageStore = new Map();
+// ✅ Estados de handoff
+const handoffActive = new Set();          // userId en modo humano
+const handoffPendingConfirm = new Set();  // userId esperando confirmación sí/no
 
-// Dedupe
-const processedMsgIds = new Set();
-
-// Cooldown
-const cooldown = new Map();
+// Cooldown para evitar spam por eventos repetidos
+const cooldown = new Map(); // userId -> timestamp
 const COOLDOWN_MS = 1200;
 
 function canReply(userId) {
@@ -61,6 +67,56 @@ function normalizeText(t) {
   return (t ?? "").toString().trim();
 }
 
+function isCommand(text) {
+  const t = text.toLowerCase();
+  return t === "reset" || t === "/reset" || t === "reiniciar";
+}
+
+// Para reactivar bot después de handoff
+function enableBotAgain(text) {
+  const t = (text || "").toLowerCase().trim();
+  return t === "bot" || t === "/bot" || t === "reactivar";
+}
+
+// Detecta intención de humano
+function wantsHuman(text) {
+  const t = (text || "").toLowerCase();
+  return (
+    t.includes("humano") ||
+    t.includes("asesor") ||
+    t.includes("agente") ||
+    t.includes("persona") ||
+    t.includes("administrador") ||
+    t.includes("admin")
+  );
+}
+
+function isAffirmative(text) {
+  const t = (text || "").toLowerCase().trim();
+  return (
+    t === "si" || t === "sí" || t === "s" ||
+    t === "yes" || t === "y" ||
+    t.includes("claro") ||
+    t.includes("dale") ||
+    t.includes("ok") ||
+    t.includes("okay") ||
+    t.includes("de acuerdo") ||
+    t.includes("por favor")
+  );
+}
+
+function isNegative(text) {
+  const t = (text || "").toLowerCase().trim();
+  return (
+    t === "no" || t === "n" ||
+    t === "nope" ||
+    t.includes("negativo") ||
+    t.includes("mejor no") ||
+    t.includes("cancel")
+  );
+}
+
+// Nombre completo, sin recortar, pero limpiando emojis/símbolos raros
 function normalizeCustomerName(raw) {
   if (!raw) return null;
 
@@ -77,8 +133,44 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
+function jidToPhone(jid) {
+  const m = (jid || "").match(/^(\d+)@/);
+  return m?.[1] ?? null;
+}
+
+function toWaLinkFromPhone(phoneDigits) {
+  if (!phoneDigits) return null;
+  const digits = phoneDigits.replace(/\D/g, "");
+  return `https://wa.me/${digits}`;
+}
+
+function buildConversationSummary(userId) {
+  const hist = memoryStore.get(userId) ?? [];
+  if (!hist.length) return "Sin historial guardado.";
+
+  const tail = hist.slice(-10);
+
+  const userLines = tail
+    .filter(x => x.role === "user")
+    .map(x => x.content)
+    .slice(-4);
+
+  const lastBot = [...tail].reverse().find(x => x.role === "assistant")?.content;
+
+  let summary = "";
+  if (userLines.length) summary += `Cliente dijo: ${userLines.join(" | ")}\n`;
+  if (lastBot) summary += `Última respuesta del bot: ${lastBot}`;
+
+  return summary.trim() || "Sin historial relevante.";
+}
+
+let sock;
+
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState("./auth");
+
+  const { version } = await fetchLatestBaileysVersion();
+
   const openai = createOpenAI();
 
   const agent = createSalesAgent({
@@ -89,9 +181,14 @@ async function start() {
     languageStore
   });
 
-  const sock = makeWASocket({
+  sock = makeWASocket({
+    version,
     auth: state,
-    logger
+    logger,
+    browser: ["Chrome (Bot MST)", "Windows", "10"],
+    printQRInTerminal: false,
+    markOnlineOnConnect: false,
+    syncFullHistory: false
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -99,42 +196,38 @@ async function start() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Log mínimo para debug
-    console.log("📡 connection.update:", { connection, hasQR: !!qr });
-
     if (qr) {
       console.log("📲 Escaneá este QR con WhatsApp:");
       qrcode.generate(qr, { small: true });
-      console.log("QR_RAW:", qr); // backup por si no se renderiza el ASCII
     }
 
     if (connection === "open") {
       console.log("✅ WhatsApp conectado");
       console.log(`⏱️  Reset por inactividad: ${RESET_AFTER_MINUTES} minuto(s)`);
+      console.log(`👤 Admins: ${ADMIN_JIDS.length ? ADMIN_JIDS.join(", ") : "(no configurados)"}`);
     }
 
     if (connection === "close") {
-      const err = lastDisconnect?.error;
-      const status = err?.output?.statusCode;
+      const reasonCode = lastDisconnect?.error?.output?.statusCode;
+      const reasonText = lastDisconnect?.error?.message;
 
-      console.log("🔌 Conexión cerrada:", {
-        status,
-        message: err?.message,
-        data: err?.data
-      });
+      console.log("🔌 Conexión cerrada. Código:", reasonCode, "| Detalle:", reasonText ?? "(sin detalle)");
 
-      // ⛔ Si es 405 NO reconectamos automáticamente para evitar loop/bloqueo
-      if (status === 405) {
-        console.log("⛔ 405 detectado: deteniendo reconexión automática.");
+      const isLoggedOut =
+        reasonCode === DisconnectReason.loggedOut ||
+        reasonText?.toLowerCase().includes("logged out");
+
+      if (isLoggedOut) {
+        console.log("🚪 Sesión cerrada (logged out). Borrá ./auth y volvé a escanear QR.");
         return;
       }
 
-      const shouldReconnect = status !== DisconnectReason.loggedOut;
-      console.log("🔁 Reconexion:", shouldReconnect);
-
-      if (shouldReconnect) start();
+      console.log("🔁 Reintentando conexión en 2s...");
+      setTimeout(() => start().catch(e => console.error("❌ Reconnect fatal:", e)), 2000);
     }
   });
+
+  const processedMsgIds = new Set();
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
@@ -143,7 +236,6 @@ async function start() {
       const msg = messages?.[0];
       if (!msg?.message) return;
 
-      // Dedupe
       const msgId = msg.key?.id;
       if (msgId) {
         if (processedMsgIds.has(msgId)) return;
@@ -157,8 +249,6 @@ async function start() {
       if (!remoteJid || remoteJid === "status@broadcast") return;
 
       const userId = remoteJid;
-      if (!canReply(userId)) return;
-
       const customerName = normalizeCustomerName(msg.pushName);
 
       const text =
@@ -170,6 +260,78 @@ async function start() {
 
       const clean = normalizeText(text);
       if (!clean) return;
+
+      if (!canReply(userId)) return;
+
+      if (isCommand(clean)) {
+        memoryStore.delete(userId);
+        lastSeenStore.delete(userId);
+        languageStore.delete(userId);
+        handoffActive.delete(userId);
+        handoffPendingConfirm.delete(userId);
+
+        await sock.sendMessage(remoteJid, {
+          text: "Listo ✅ reinicié la conversación. ¿En qué te ayudo? 🙂"
+        });
+        return;
+      }
+
+      if (handoffActive.has(userId)) {
+        if (enableBotAgain(clean)) {
+          handoffActive.delete(userId);
+          await sock.sendMessage(remoteJid, { text: "Listo ✅ ya estoy de vuelta. ¿En qué te ayudo? 🙂" });
+        }
+        return;
+      }
+
+      if (handoffPendingConfirm.has(userId)) {
+        if (isAffirmative(clean)) {
+          handoffPendingConfirm.delete(userId);
+          handoffActive.add(userId);
+
+          await sock.sendMessage(remoteJid, {
+            text: "Listo ✅ en breve te contactará el administrador. Gracias por tu paciencia 🙂"
+          });
+
+          const clientPhone = jidToPhone(userId);
+          const clientLink = clientPhone ? toWaLinkFromPhone(clientPhone) : null;
+          const summary = buildConversationSummary(userId);
+
+          const adminMsg =
+            `🧑‍💼 Solicitud de HUMANO\n` +
+            `Cliente: ${customerName ?? "(sin nombre)"}\n` +
+            `Contacto: ${clientPhone ?? userId}\n` +
+            (clientLink ? `Link directo: ${clientLink}\n` : "") +
+            `\nResumen:\n${summary}`;
+
+          for (const adminJid of ADMIN_JIDS) {
+            await sock.sendMessage(adminJid, { text: adminMsg });
+          }
+
+          return;
+        }
+
+        if (isNegative(clean)) {
+          handoffPendingConfirm.delete(userId);
+          await sock.sendMessage(remoteJid, {
+            text: "De una 🙂 entonces seguimos por acá. ¿Qué necesitás saber? 🍓"
+          });
+          return;
+        }
+
+        await sock.sendMessage(remoteJid, {
+          text: "¿Querés que te pase con un humano? Respondé: Sí / No 🙂"
+        });
+        return;
+      }
+
+      if (clean === "AGENTE" || wantsHuman(clean)) {
+        handoffPendingConfirm.add(userId);
+        await sock.sendMessage(remoteJid, {
+          text: "Claro 🙂 ¿Querés que te pase con un humano? Respondé: Sí / No"
+        });
+        return;
+      }
 
       await sock.sendPresenceUpdate("composing", remoteJid);
 
