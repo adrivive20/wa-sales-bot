@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  bot_mst_2026:
+    build: .
+    image: bot_mst_2026:latest
+    container_name: bot_mst_2026
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PORT: 3030
+      BOT_NAME: ${BOT_NAME}
+      COMPANY_NAME: ${COMPANY_NAME}
+      RESET_AFTER_MINUTES: ${RESET_AFTER_MINUTES}
+      HUMAN_PHONE_E164: ${HUMAN_PHONE_E164}
+      ADMIN_JIDS: ${ADMIN_JIDS}
+    ports:
+      - "3030:3030"
+    volumes:
+      - bot_mst_2026_auth:/app/auth
+
+volumes:
+  bot_mst_2026_auth:
