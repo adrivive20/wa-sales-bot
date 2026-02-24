@@ -1,48 +1,97 @@
+// app.js
 import "dotenv/config";
 import express from "express";
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState
-} from "@whiskeysockets/baileys";
-import P from "pino";
+import pino from "pino";
 import qrcode from "qrcode-terminal";
 
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason
+} from "@whiskeysockets/baileys";
+
+import { createOpenAI } from "./openaiClient.js";
 import { createSalesAgent } from "./salesAgent.js";
-import { openai } from "./openaiClient.js";
 
-const PORT = process.env.PORT || 3030;
+const PORT = Number(process.env.PORT ?? 3030);
+const BOT_NAME = process.env.BOT_NAME ?? "SweetBot";
+const COMPANY_NAME = process.env.COMPANY_NAME ?? "My Sweet Time";
 
-const BOT_NAME = process.env.BOT_NAME || "SweetBot";
-const COMPANY_NAME = process.env.COMPANY_NAME || "My Sweet Time";
-const RESET_AFTER_MINUTES = Number(process.env.RESET_AFTER_MINUTES || 180);
-const HUMAN_PHONE_E164 = process.env.HUMAN_PHONE_E164;
-const ADMIN_JIDS = process.env.ADMIN_JIDS
-  ? process.env.ADMIN_JIDS.split(",")
-  : [];
+/**
+ * Reset configurable por inactividad:
+ * Preferido: RESET_AFTER_MINUTES
+ * Fallback: RESET_AFTER_HOURS
+ * Default: 180 min
+ */
+const RESET_AFTER_MINUTES = process.env.RESET_AFTER_MINUTES
+  ? Number(process.env.RESET_AFTER_MINUTES)
+  : (process.env.RESET_AFTER_HOURS ? Number(process.env.RESET_AFTER_HOURS) * 60 : 180);
 
+const RESET_AFTER_MS = Math.max(1, RESET_AFTER_MINUTES) * 60 * 1000;
+
+// Server HTTP (para healthcheck)
+const app = express();
+app.get("/", (_req, res) => res.send("✅ WA Bot ON"));
+app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT}`));
+
+const logger = pino({ level: "silent" });
+
+// Memoria por usuario (RAM)
 const memoryStore = new Map();
 const lastSeenStore = new Map();
 
-const salesAgent = createSalesAgent({
-  openai,
-  botName: BOT_NAME,
-  companyName: COMPANY_NAME
-});
+// Idioma por usuario (si tu salesAgent usa esto)
+const languageStore = new Map();
 
-// Servidor HTTP (para que Docker no crea que el contenedor está muerto)
-const app = express();
-app.get("/", (_, res) => res.send("Bot activo"));
-app.listen(PORT, () => {
-  console.log(`🛜  HTTP Server ON http://localhost:${PORT}`);
-});
+// Dedupe
+const processedMsgIds = new Set();
+
+// Cooldown
+const cooldown = new Map();
+const COOLDOWN_MS = 1200;
+
+function canReply(userId) {
+  const now = Date.now();
+  const last = cooldown.get(userId) ?? 0;
+  if (now - last < COOLDOWN_MS) return false;
+  cooldown.set(userId, now);
+  return true;
+}
+
+function normalizeText(t) {
+  return (t ?? "").toString().trim();
+}
+
+function normalizeCustomerName(raw) {
+  if (!raw) return null;
+
+  let name = raw
+    .toString()
+    .replace(/[^\p{L}\p{M}\s'.-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!name) return null;
+  if (name.length > 50) name = name.substring(0, 50).trim();
+  if (/\d/.test(name)) return null;
+
+  return name;
+}
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState("./auth");
+  const openai = createOpenAI();
+
+  const agent = createSalesAgent({
+    openai,
+    botName: BOT_NAME,
+    companyName: COMPANY_NAME,
+    resetAfterMs: RESET_AFTER_MS,
+    languageStore
+  });
 
   const sock = makeWASocket({
     auth: state,
-    logger: P({ level: "silent" }),
-    browser: ["Bot MST", "Chrome", "1.0.0"]
+    logger
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -50,14 +99,18 @@ async function start() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    // Log mínimo para debug
+    console.log("📡 connection.update:", { connection, hasQR: !!qr });
+
     if (qr) {
-      console.log("📲 QR recibido:");
+      console.log("📲 Escaneá este QR con WhatsApp:");
       qrcode.generate(qr, { small: true });
-      console.log("QR_RAW:", qr);
+      console.log("QR_RAW:", qr); // backup por si no se renderiza el ASCII
     }
 
     if (connection === "open") {
-      console.log("✅ WhatsApp conectado correctamente");
+      console.log("✅ WhatsApp conectado");
+      console.log(`⏱️  Reset por inactividad: ${RESET_AFTER_MINUTES} minuto(s)`);
     }
 
     if (connection === "close") {
@@ -70,53 +123,70 @@ async function start() {
         data: err?.data
       });
 
-      // ⛔ Si es 405 NO reconectamos automáticamente
+      // ⛔ Si es 405 NO reconectamos automáticamente para evitar loop/bloqueo
       if (status === 405) {
-        console.log("⛔ Error 405 detectado. Deteniendo reconexión automática.");
+        console.log("⛔ 405 detectado: deteniendo reconexión automática.");
         return;
       }
 
       const shouldReconnect = status !== DisconnectReason.loggedOut;
+      console.log("🔁 Reconexion:", shouldReconnect);
 
-      if (shouldReconnect) {
-        console.log("🔁 Intentando reconectar...");
-        start();
-      } else {
-        console.log("🚪 Sesión cerrada (loggedOut).");
-      }
+      if (shouldReconnect) start();
     }
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-
-    const msg = messages[0];
-    if (!msg.message) return;
-    if (msg.key.fromMe) return;
-
-    const sender = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text;
-
-    if (!text) return;
-
     try {
-      const reply = await salesAgent({
-        userId: sender,
-        text,
+      if (type !== "notify") return;
+
+      const msg = messages?.[0];
+      if (!msg?.message) return;
+
+      // Dedupe
+      const msgId = msg.key?.id;
+      if (msgId) {
+        if (processedMsgIds.has(msgId)) return;
+        processedMsgIds.add(msgId);
+        if (processedMsgIds.size > 2000) processedMsgIds.clear();
+      }
+
+      if (msg.key.fromMe) return;
+
+      const remoteJid = msg.key.remoteJid;
+      if (!remoteJid || remoteJid === "status@broadcast") return;
+
+      const userId = remoteJid;
+      if (!canReply(userId)) return;
+
+      const customerName = normalizeCustomerName(msg.pushName);
+
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        "";
+
+      const clean = normalizeText(text);
+      if (!clean) return;
+
+      await sock.sendPresenceUpdate("composing", remoteJid);
+
+      const answer = await agent({
+        userId,
+        text: clean,
         memoryStore,
-        lastSeenStore
+        lastSeenStore,
+        customerName
       });
 
-      await sock.sendMessage(sender, { text: reply });
-    } catch (error) {
-      console.error("❌ Error procesando mensaje:", error);
-      await sock.sendMessage(sender, {
-        text: "Ups, algo pasó procesando tu mensaje 😅 intentá de nuevo."
-      });
+      await sock.sendMessage(remoteJid, { text: answer });
+      await sock.sendPresenceUpdate("available", remoteJid);
+    } catch (err) {
+      console.error("❌ Error en messages.upsert:", err?.message || err);
     }
   });
 }
 
-start();
+start().catch((e) => console.error("❌ Fatal:", e));
