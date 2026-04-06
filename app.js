@@ -47,8 +47,7 @@ const memoryStore = new Map();    // userId -> [{role, content}, ...]
 const lastSeenStore = new Map();  // userId -> timestamp (ms)
 const languageStore = new Map();  // userId -> {lang, streak, lastCandidate}
 
-// ✅ Estados de handoff
-const handoffActive = new Set();          // userId en modo humano
+// ✅ Estado esperando confirmación sí/no para hablar con humano
 const handoffPendingConfirm = new Set();  // userId esperando confirmación sí/no
 
 // Cooldown para evitar spam por eventos repetidos
@@ -72,7 +71,7 @@ function isCommand(text) {
   return t === "reset" || t === "/reset" || t === "reiniciar";
 }
 
-// Para reactivar bot después de handoff
+// Se deja por compatibilidad si más adelante lo querés reutilizar
 function enableBotAgain(text) {
   const t = (text || "").toLowerCase().trim();
   return t === "bot" || t === "/bot" || t === "reactivar";
@@ -267,7 +266,6 @@ async function start() {
         memoryStore.delete(userId);
         lastSeenStore.delete(userId);
         languageStore.delete(userId);
-        handoffActive.delete(userId);
         handoffPendingConfirm.delete(userId);
 
         await sock.sendMessage(remoteJid, {
@@ -276,21 +274,12 @@ async function start() {
         return;
       }
 
-      if (handoffActive.has(userId)) {
-        if (enableBotAgain(clean)) {
-          handoffActive.delete(userId);
-          await sock.sendMessage(remoteJid, { text: "Listo ✅ ya estoy de vuelta. ¿En qué te ayudo? 🙂" });
-        }
-        return;
-      }
-
       if (handoffPendingConfirm.has(userId)) {
         if (isAffirmative(clean)) {
           handoffPendingConfirm.delete(userId);
-          handoffActive.add(userId);
 
           await sock.sendMessage(remoteJid, {
-            text: "Listo ✅ en breve te contactará el administrador. Gracias por tu paciencia 🙂"
+            text: "Perfecto 🙌 ya le pasé tu caso a un humano. Mientras tanto, puedo seguir ayudándote por acá 🙂"
           });
 
           const clientPhone = jidToPhone(userId);
