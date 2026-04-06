@@ -58,7 +58,7 @@ Waze solo si lo piden:
 https://waze.com/ul/hd1u0fvz0z
 
 Horario:
-Martes a domingo, 1pm–9pm.
+Martes a domingo, 2pm–9pm.
 
 Pedidos:
 - También estamos disponibles en Uber Eats.
