@@ -248,7 +248,7 @@ async function start() {
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid || remoteJid === "status@broadcast") return;
 
-      const userId = remoteJid;
+      const userId = msg.key.participant || remoteJid;
       const customerName = normalizeCustomerName(msg.pushName);
 
       const text =
@@ -260,6 +260,25 @@ async function start() {
 
       const clean = normalizeText(text);
       if (!clean) return;
+
+      // ================= DEBUG USUARIO =================
+      const debugPhone = jidToPhone(userId);
+      const debugLink = toWaLinkFromPhone(debugPhone);
+
+      console.log("\n================= 📩 NUEVO MENSAJE =================");
+      console.log("🧾 remoteJid:", msg.key.remoteJid);
+      console.log("👤 participant:", msg.key.participant);
+      console.log("🆔 userId final:", userId);
+      console.log("📱 teléfono extraído:", debugPhone);
+      console.log("🔗 waLink:", debugLink);
+      console.log("🧑 nombre (pushName):", msg.pushName);
+      console.log("🧑 nombre limpio:", customerName);
+      console.log("💬 mensaje:", clean);
+      console.log("📦 tipo mensaje:", Object.keys(msg.message));
+      console.log("🧠 RAW KEY:", JSON.stringify(msg.key, null, 2));
+      console.log("🧠 RAW MSG:", JSON.stringify(msg, null, 2));
+      console.log("====================================================\n");
+      // =================================================
 
       if (!canReply(userId)) return;
 
