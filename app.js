@@ -108,10 +108,16 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
+// ✅ CORREGIDO (igual que el archivo 2)
 function jidToPhone(jid) {
-  // "506XXXXXXXX@s.whatsapp.net" -> "506XXXXXXXX"
   const m = (jid || "").match(/^(\d+)@/);
   return m?.[1] ?? null;
+}
+
+function toWaLinkFromPhone(phoneDigits) {
+  if (!phoneDigits) return null;
+  const digits = phoneDigits.replace(/\D/g, "");
+  return `https://wa.me/${digits}`;
 }
 
 function buildConversationSummary(userId) {
@@ -202,7 +208,7 @@ async function start() {
 
       const clientPhone = jidToPhone(userId);
       const clientLink = clientPhone
-        ? `https://wa.me/${clientPhone}`
+        ? toWaLinkFromPhone(clientPhone)
         : null;
 
       // RESET
