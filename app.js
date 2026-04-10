@@ -5,6 +5,7 @@ import qrcode from "qrcode-terminal";
 
 import makeWASocket, {
   useMultiFileAuthState,
+  DisconnectReason,
   fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
@@ -32,11 +33,15 @@ app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT
 
 const logger = pino({ level: "silent" });
 
+// Memoria
 const memoryStore = new Map();
 const lastSeenStore = new Map();
 const languageStore = new Map();
+
+// Confirmación humano
 const handoffPendingConfirm = new Set();
 
+// Cooldown
 const cooldown = new Map();
 const COOLDOWN_MS = 1200;
 
@@ -103,34 +108,24 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
-// 🔥 EXTRAER NÚMERO BIEN (REAL FIX)
-function extractPhone(msg) {
-  const candidates = [
-    msg?.key?.remoteJid,
-    msg?.key?.participant,
-    msg?.participant,
-    msg?.key?.id
-  ];
+// 🔥 FUNCIÓN MEJORADA (multi-país)
+function jidToPhone(jid) {
+  const m = (jid || "").match(/^(\d+)@/);
+  if (!m) return null;
 
-  for (const jid of candidates) {
-    if (!jid) continue;
+  let digits = m[1];
 
-    const m = jid.match(/^(\d+)@/);
-    if (!m) continue;
-
-    let digits = m[1];
-
-    // ❌ descartar IDs absurdos
-    if (digits.length > 15) continue;
-
-    // ✅ número internacional
-    if (digits.length > 8) return digits;
-
-    // 🇨🇷 local
-    if (digits.length === 8) return "506" + digits;
+  // Si ya tiene código país
+  if (digits.length > 8) {
+    return digits;
   }
 
-  return null;
+  // Si es número local (ej: CR)
+  if (digits.length === 8) {
+    return "506" + digits;
+  }
+
+  return digits;
 }
 
 function buildConversationSummary(userId) {
@@ -219,8 +214,15 @@ async function start() {
 
       if (!canReply(userId)) return;
 
-      // 🔥 AQUÍ EL FIX REAL
-      const clientPhone = extractPhone(msg);
+      // FIX teléfono correcto
+      let sourceJid;
+      if (remoteJid.endsWith("@g.us")) {
+        sourceJid = msg.key.participant;
+      } else {
+        sourceJid = remoteJid;
+      }
+
+      const clientPhone = jidToPhone(sourceJid);
       const clientLink = clientPhone
         ? `https://wa.me/${clientPhone}`
         : null;
