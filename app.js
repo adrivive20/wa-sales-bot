@@ -66,15 +66,21 @@ function enableBotAgain(text) {
   return t === "bot" || t === "/bot" || t === "reactivar";
 }
 
+// 🔥 AJUSTE FINO AQUÍ
 function wantsHuman(text) {
-  const t = (text || "").toLowerCase();
+  const t = (text || "").toLowerCase().trim();
+
   return (
-    t.includes("humano") ||
-    t.includes("asesor") ||
-    t.includes("agente") ||
-    t.includes("persona") ||
-    t.includes("administrador") ||
-    t.includes("admin")
+    t.includes("hablar con un humano") ||
+    t.includes("quiero hablar con un humano") ||
+    t.includes("pasame con un humano") ||
+    t.includes("pasar con un humano") ||
+    t.includes("hablar con un agente") ||
+    t.includes("pasame con un agente") ||
+    t.includes("quiero un asesor") ||
+    t.includes("necesito un asesor") ||
+    t.includes("hablar con una persona") ||
+    t.includes("atención humana")
   );
 }
 
