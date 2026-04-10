@@ -5,6 +5,7 @@ import qrcode from "qrcode-terminal";
 
 import makeWASocket, {
   useMultiFileAuthState,
+  DisconnectReason,
   fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
@@ -32,16 +33,15 @@ app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT
 
 const logger = pino({ level: "silent" });
 
+// Memoria
 const memoryStore = new Map();
 const lastSeenStore = new Map();
 const languageStore = new Map();
 
-// 🔥 store de teléfonos
-const phoneStore = new Map();
-
-// 🔥 confirmación humano
+// Confirmación humano
 const handoffPendingConfirm = new Set();
 
+// Cooldown
 const cooldown = new Map();
 const COOLDOWN_MS = 1200;
 
@@ -80,7 +80,8 @@ function isAffirmative(text) {
     t === "yes" || t === "y" ||
     t.includes("claro") ||
     t.includes("dale") ||
-    t.includes("ok")
+    t.includes("ok") ||
+    t.includes("de acuerdo")
   );
 }
 
@@ -92,30 +93,33 @@ function isNegative(text) {
   );
 }
 
-// 🔥 extracción REAL del número
-function extractPhone(msg) {
-  const id =
-    msg.key.participant ||
-    msg.key.remoteJid ||
-    "";
+function normalizeCustomerName(raw) {
+  if (!raw) return "Cliente";
 
-  const match = id.match(/(\d{8,15})/);
-  if (!match) return null;
+  let name = raw
+    .toString()
+    .replace(/[^\p{L}\p{M}\s'.-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  let digits = match[1];
+  if (!name) return "Cliente";
+  if (name.length > 50) name = name.substring(0, 50).trim();
 
-  if (digits.length > 12) return null;
+  return name;
+}
+
+// 🔥 FUNCIÓN CORRECTA (ajustada)
+function jidToPhone(jid) {
+  const m = (jid || "").match(/^(\d+)@/);
+  if (!m) return null;
+
+  let digits = m[1];
 
   if (digits.length === 8) {
     digits = "506" + digits;
   }
 
   return digits;
-}
-
-function toWaLinkFromPhone(phoneDigits) {
-  if (!phoneDigits) return null;
-  return `https://wa.me/${phoneDigits}`;
 }
 
 function buildConversationSummary(userId) {
@@ -189,9 +193,10 @@ async function start() {
       if (!msg?.message || msg.key.fromMe) return;
 
       const remoteJid = msg.key.remoteJid;
-      const userId = remoteJid;
+      if (!remoteJid || remoteJid === "status@broadcast") return;
 
-      const customerName = msg.pushName || "Cliente";
+      const userId = remoteJid;
+      const customerName = normalizeCustomerName(msg.pushName);
 
       const text =
         msg.message.conversation ||
@@ -203,27 +208,30 @@ async function start() {
 
       if (!canReply(userId)) return;
 
-      // 🔥 guardar teléfono válido
-      const detectedPhone = extractPhone(msg);
-      if (detectedPhone) {
-        phoneStore.set(userId, detectedPhone);
-      }
+      // 🔥 AQUÍ ESTÁ EL FIX REAL
+      const participant =
+        msg.key.participant ||
+        msg.key.remoteJid;
 
-      const clientPhone = phoneStore.get(userId);
-      const clientLink = toWaLinkFromPhone(clientPhone);
+      const clientPhone = jidToPhone(participant);
+      const clientLink = clientPhone
+        ? `https://wa.me/${clientPhone}`
+        : null;
 
-      // 👉 pedir humano
-      if (clean === "AGENTE" || wantsHuman(clean)) {
-        handoffPendingConfirm.add(userId);
+      // RESET
+      if (isCommand(clean)) {
+        memoryStore.delete(userId);
+        lastSeenStore.delete(userId);
+        languageStore.delete(userId);
+        handoffPendingConfirm.delete(userId);
 
         await sock.sendMessage(remoteJid, {
-          text: "Claro 🙂 ¿Querés que te pase con un humano? Respondé: Sí / No"
+          text: "Listo ✅ reinicié la conversación. ¿En qué te ayudo? 🙂"
         });
-
         return;
       }
 
-      // 👉 confirmación humano
+      // CONFIRMACIÓN HUMANO
       if (handoffPendingConfirm.has(userId)) {
 
         if (isAffirmative(clean)) {
@@ -231,15 +239,12 @@ async function start() {
 
           const summary = buildConversationSummary(userId);
 
-          let adminMsg =
+          const adminMsg =
             `🧑‍💼 Solicitud de HUMANO\n` +
-            `Cliente: ${customerName}\n`;
-
-          if (clientLink) {
-            adminMsg += `Link directo: ${clientLink}\n`;
-          }
-
-          adminMsg += `\nResumen:\n${summary}`;
+            `Cliente: ${customerName}\n` +
+            `Contacto: ${clientPhone}\n` +
+            `Link directo: ${clientLink}\n` +
+            `\nResumen:\n${summary}`;
 
           for (const adminJid of ADMIN_JIDS) {
             await sock.sendMessage(adminJid, { text: adminMsg });
@@ -256,7 +261,7 @@ async function start() {
           handoffPendingConfirm.delete(userId);
 
           await sock.sendMessage(remoteJid, {
-            text: "De una 🙂 seguimos por acá entonces. ¿Qué necesitás saber? 🍓"
+            text: "De una 🙂 seguimos por acá. ¿Qué necesitás saber? 🍓"
           });
 
           return;
@@ -269,12 +274,24 @@ async function start() {
         return;
       }
 
-      // 🤖 flujo normal
+      // PEDIR HUMANO
+      if (clean === "AGENTE" || wantsHuman(clean)) {
+        handoffPendingConfirm.add(userId);
+
+        await sock.sendMessage(remoteJid, {
+          text: "Claro 🙂 ¿Querés que te pase con un humano? Respondé: Sí / No"
+        });
+
+        return;
+      }
+
+      // BOT NORMAL
       const answer = await agent({
         userId,
         text: clean,
         memoryStore,
-        lastSeenStore
+        lastSeenStore,
+        customerName
       });
 
       await sock.sendMessage(remoteJid, { text: answer });
