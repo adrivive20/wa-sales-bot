@@ -5,7 +5,6 @@ import qrcode from "qrcode-terminal";
 
 import makeWASocket, {
   useMultiFileAuthState,
-  DisconnectReason,
   fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
@@ -37,7 +36,10 @@ const memoryStore = new Map();
 const lastSeenStore = new Map();
 const languageStore = new Map();
 
-// 🔥 estado de confirmación humano
+// 🔥 store de teléfonos
+const phoneStore = new Map();
+
+// 🔥 confirmación humano
 const handoffPendingConfirm = new Set();
 
 const cooldown = new Map();
@@ -90,12 +92,11 @@ function isNegative(text) {
   );
 }
 
-// 🔥 extracción REAL del número (sin IDs raros)
+// 🔥 extracción REAL del número
 function extractPhone(msg) {
   const id =
     msg.key.participant ||
     msg.key.remoteJid ||
-    msg.key.from ||
     "";
 
   const match = id.match(/(\d{8,15})/);
@@ -103,10 +104,8 @@ function extractPhone(msg) {
 
   let digits = match[1];
 
-  // filtrar IDs falsos largos
   if (digits.length > 12) return null;
 
-  // normalizar CR
   if (digits.length === 8) {
     digits = "506" + digits;
   }
@@ -192,6 +191,8 @@ async function start() {
       const remoteJid = msg.key.remoteJid;
       const userId = remoteJid;
 
+      const customerName = msg.pushName || "Cliente";
+
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -202,7 +203,16 @@ async function start() {
 
       if (!canReply(userId)) return;
 
-      // 🔥 paso 1: pidió humano
+      // 🔥 guardar teléfono válido
+      const detectedPhone = extractPhone(msg);
+      if (detectedPhone) {
+        phoneStore.set(userId, detectedPhone);
+      }
+
+      const clientPhone = phoneStore.get(userId);
+      const clientLink = toWaLinkFromPhone(clientPhone);
+
+      // 👉 pedir humano
       if (clean === "AGENTE" || wantsHuman(clean)) {
         handoffPendingConfirm.add(userId);
 
@@ -213,21 +223,23 @@ async function start() {
         return;
       }
 
-      // 🔥 paso 2: confirmación
+      // 👉 confirmación humano
       if (handoffPendingConfirm.has(userId)) {
 
         if (isAffirmative(clean)) {
           handoffPendingConfirm.delete(userId);
 
-          const clientPhone = extractPhone(msg);
-          const clientLink = toWaLinkFromPhone(clientPhone);
           const summary = buildConversationSummary(userId);
 
-          const adminMsg =
+          let adminMsg =
             `🧑‍💼 Solicitud de HUMANO\n` +
-            `Contacto: ${clientPhone ?? "No disponible"}\n` +
-            (clientLink ? `Link directo: ${clientLink}\n` : "") +
-            `\nResumen:\n${summary}`;
+            `Cliente: ${customerName}\n`;
+
+          if (clientLink) {
+            adminMsg += `Link directo: ${clientLink}\n`;
+          }
+
+          adminMsg += `\nResumen:\n${summary}`;
 
           for (const adminJid of ADMIN_JIDS) {
             await sock.sendMessage(adminJid, { text: adminMsg });
