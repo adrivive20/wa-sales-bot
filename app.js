@@ -108,17 +108,10 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
-// 🔥 VALIDACIÓN REAL AQUÍ
 function jidToPhone(jid) {
+  // "506XXXXXXXX@s.whatsapp.net" -> "506XXXXXXXX"
   const m = (jid || "").match(/^(\d+)@/);
-  if (!m) return null;
-
-  const digits = m[1];
-
-  // ❌ descartar IDs raros
-  if (digits.length > 15) return null;
-
-  return digits;
+  return m?.[1] ?? null;
 }
 
 function buildConversationSummary(userId) {
