@@ -17,20 +17,12 @@ const PORT = Number(process.env.PORT ?? 3040);
 const BOT_NAME = process.env.BOT_NAME ?? "SweetBot";
 const COMPANY_NAME = process.env.COMPANY_NAME ?? "My Sweet Time";
 
-/**
- * ✅ Reset configurable por inactividad
- * Preferido: RESET_AFTER_MINUTES
- * Fallback: RESET_AFTER_HOURS
- * Default: 180 minutos
- */
 const RESET_AFTER_MINUTES = process.env.RESET_AFTER_MINUTES
   ? Number(process.env.RESET_AFTER_MINUTES)
   : (process.env.RESET_AFTER_HOURS ? Number(process.env.RESET_AFTER_HOURS) * 60 : 180);
 
 const RESET_AFTER_MS = Math.max(1, RESET_AFTER_MINUTES) * 60 * 1000;
 
-// ✅ Handoff / humano
-const HUMAN_PHONE_E164 = (process.env.HUMAN_PHONE_E164 ?? "").trim(); // 50672844010
 const ADMIN_JIDS = (process.env.ADMIN_JIDS ?? "")
   .split(",")
   .map(s => s.trim())
@@ -38,21 +30,18 @@ const ADMIN_JIDS = (process.env.ADMIN_JIDS ?? "")
 
 const app = express();
 app.get("/", (_req, res) => res.send("✅ WA Bot ON"));
-app.listen(PORT, () => console.log(`🛜  HTTP Server ON http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`🛜 HTTP Server ON http://localhost:${PORT}`));
 
 const logger = pino({ level: "silent" });
 
-// Memoria por usuario (RAM)
-const memoryStore = new Map();    // userId -> [{role, content}, ...]
-const lastSeenStore = new Map();  // userId -> timestamp (ms)
-const languageStore = new Map();  // userId -> {lang, streak, lastCandidate}
+const memoryStore = new Map();
+const lastSeenStore = new Map();
+const languageStore = new Map();
 
-// ✅ Estados de handoff
-const handoffActive = new Set();          // userId en modo humano
-const handoffPendingConfirm = new Set();  // userId esperando confirmación sí/no
+const handoffActive = new Set();
+const handoffPendingConfirm = new Set();
 
-// Cooldown para evitar spam por eventos repetidos
-const cooldown = new Map(); // userId -> timestamp
+const cooldown = new Map();
 const COOLDOWN_MS = 1200;
 
 function canReply(userId) {
@@ -72,13 +61,11 @@ function isCommand(text) {
   return t === "reset" || t === "/reset" || t === "reiniciar";
 }
 
-// Para reactivar bot después de handoff
 function enableBotAgain(text) {
   const t = (text || "").toLowerCase().trim();
   return t === "bot" || t === "/bot" || t === "reactivar";
 }
 
-// Detecta intención de humano
 function wantsHuman(text) {
   const t = (text || "").toLowerCase();
   return (
@@ -116,7 +103,6 @@ function isNegative(text) {
   );
 }
 
-// Nombre completo, sin recortar, pero limpiando emojis/símbolos raros
 function normalizeCustomerName(raw) {
   if (!raw) return null;
 
@@ -133,13 +119,12 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
-// ✅ Toma el JID real aunque WhatsApp mande @lid
+// 🔥 FIX @lid
 function extractEffectiveUserJid(key) {
   if (key?.addressingMode === "lid" && key?.remoteJidAlt) {
     return key.remoteJidAlt;
   }
-
-  return key?.participant || key?.remoteJid || null;
+  return key?.participant || key?.remoteJid;
 }
 
 function jidToPhone(jid) {
@@ -151,14 +136,6 @@ function toWaLinkFromPhone(phoneDigits) {
   if (!phoneDigits) return null;
   const digits = phoneDigits.replace(/\D/g, "");
   return `https://wa.me/${digits}`;
-}
-
-// ✅ Link con mensaje precargado
-function toPrefilledWaLinkFromPhone(phoneDigits, text) {
-  if (!phoneDigits) return null;
-  const digits = phoneDigits.replace(/\D/g, "");
-  const encoded = encodeURIComponent(text ?? "");
-  return `https://wa.me/${digits}?text=${encoded}`;
 }
 
 function buildConversationSummary(userId) {
@@ -187,7 +164,6 @@ async function start() {
   console.log("🚀 Iniciando bot...");
 
   const { state, saveCreds } = await useMultiFileAuthState("./auth");
-
   const { version } = await fetchLatestBaileysVersion();
 
   const openai = createOpenAI();
@@ -203,50 +179,26 @@ async function start() {
   sock = makeWASocket({
     version,
     auth: state,
-    logger,
-    browser: ["Chrome (Bot MST)", "Windows", "10"],
-    printQRInTerminal: false,
-    markOnlineOnConnect: false,
-    syncFullHistory: false
+    logger
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
+  sock.ev.on("connection.update", ({ connection, qr }) => {
     if (qr) {
-      console.log("📲 Escaneá este QR con WhatsApp:");
+      console.log("📲 Escaneá el QR:");
       qrcode.generate(qr, { small: true });
     }
 
     if (connection === "open") {
       console.log("✅ WhatsApp conectado");
-      console.log(`⏱️  Reset por inactividad: ${RESET_AFTER_MINUTES} minuto(s)`);
-      console.log(`👤 Admins: ${ADMIN_JIDS.length ? ADMIN_JIDS.join(", ") : "(no configurados)"}`);
     }
 
     if (connection === "close") {
-      const reasonCode = lastDisconnect?.error?.output?.statusCode;
-      const reasonText = lastDisconnect?.error?.message;
-
-      console.log("🔌 Conexión cerrada. Código:", reasonCode, "| Detalle:", reasonText ?? "(sin detalle)");
-
-      const isLoggedOut =
-        reasonCode === DisconnectReason.loggedOut ||
-        reasonText?.toLowerCase().includes("logged out");
-
-      if (isLoggedOut) {
-        console.log("🚪 Sesión cerrada (logged out). Borrá ./auth y volvé a escanear QR.");
-        return;
-      }
-
-      console.log("🔁 Reintentando conexión en 2s...");
-      setTimeout(() => start().catch(e => console.error("❌ Reconnect fatal:", e)), 2000);
+      console.log("🔁 Reconectando...");
+      setTimeout(start, 2000);
     }
   });
-
-  const processedMsgIds = new Set();
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
@@ -254,102 +206,32 @@ async function start() {
 
       const msg = messages?.[0];
       if (!msg?.message) return;
-
-      const msgId = msg.key?.id;
-      if (msgId) {
-        if (processedMsgIds.has(msgId)) return;
-        processedMsgIds.add(msgId);
-        if (processedMsgIds.size > 2000) processedMsgIds.clear();
-      }
-
       if (msg.key.fromMe) return;
 
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid || remoteJid === "status@broadcast") return;
 
       const userId = extractEffectiveUserJid(msg.key);
-      if (!userId) {
-        console.log("⚠️ No se pudo resolver userId real. Key:", JSON.stringify(msg.key, null, 2));
-        return;
-      }
-
       const customerName = normalizeCustomerName(msg.pushName);
 
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
         "";
 
       const clean = normalizeText(text);
       if (!clean) return;
 
-      // ================= DEBUG USUARIO =================
-      const debugPhone = jidToPhone(userId);
-      const debugLink = toWaLinkFromPhone(debugPhone);
-      const debugPrefilledLink = toPrefilledWaLinkFromPhone(
-        debugPhone,
-        "Hola! Te contacto por tu consulta en My Sweet Time 🍓"
-      );
-
-      console.log("\n================= 📩 NUEVO MENSAJE =================");
-      console.log("🧑 Nombre (pushName):", msg.pushName);
-      console.log("🧑 Nombre limpio:", customerName ?? "(sin nombre)");
-      console.log("📱 Número real:", debugPhone ?? "(no disponible)");
-      console.log("🔗 Link directo:", debugLink ?? "(no disponible)");
-      console.log("💬 Link con mensaje:", debugPrefilledLink ?? "(no disponible)");
-      console.log("🧾 remoteJid:", msg.key.remoteJid);
-      console.log("🧾 remoteJidAlt:", msg.key.remoteJidAlt);
-      console.log("👤 participant:", msg.key.participant);
-      console.log("🆔 userId final:", userId);
-      console.log("🧠 addressingMode:", msg.key.addressingMode);
-      console.log("💬 mensaje:", clean);
-      console.log("📦 tipo mensaje:", Object.keys(msg.message));
-      console.log("🧠 RAW KEY:", JSON.stringify(msg.key, null, 2));
-      console.log("🧠 RAW MSG:", JSON.stringify(msg, null, 2));
-      console.log("====================================================\n");
-      // =================================================
-
       if (!canReply(userId)) return;
-
-      if (isCommand(clean)) {
-        memoryStore.delete(userId);
-        lastSeenStore.delete(userId);
-        languageStore.delete(userId);
-        handoffActive.delete(userId);
-        handoffPendingConfirm.delete(userId);
-
-        await sock.sendMessage(remoteJid, {
-          text: "Listo ✅ reinicié la conversación. ¿En qué te ayudo? 🙂"
-        });
-        return;
-      }
-
-      if (handoffActive.has(userId)) {
-        if (enableBotAgain(clean)) {
-          handoffActive.delete(userId);
-          await sock.sendMessage(remoteJid, { text: "Listo ✅ ya estoy de vuelta. ¿En qué te ayudo? 🙂" });
-        }
-        return;
-      }
 
       if (handoffPendingConfirm.has(userId)) {
         if (isAffirmative(clean)) {
           handoffPendingConfirm.delete(userId);
 
-          await sock.sendMessage(remoteJid, {
-            text: "Perfecto 🙌 ya le pasé tu caso a un humano. Mientras tanto, puedo seguir ayudándote por acá 🙂"
-          });
-
           const clientPhone = jidToPhone(userId);
-          const clientLink = clientPhone
-            ? toPrefilledWaLinkFromPhone(
-                clientPhone,
-                "Hola! Te contacto por tu consulta en My Sweet Time 🍓"
-              )
-            : null;
+          console.log(`🧑‍💼 HUMANO: ${customerName ?? "(sin nombre)"} | ${clientPhone ?? userId}`);
 
+          const clientLink = clientPhone ? toWaLinkFromPhone(clientPhone) : null;
           const summary = buildConversationSummary(userId);
 
           const adminMsg =
@@ -359,30 +241,16 @@ async function start() {
             (clientLink ? `Link directo: ${clientLink}\n` : "") +
             `\nResumen:\n${summary}`;
 
-          console.log(
-            "🧑‍💼 Cliente pidió humano:",
-            `${customerName ?? "(sin nombre)"} | ${clientPhone ?? userId}`
-          );
-
           for (const adminJid of ADMIN_JIDS) {
             await sock.sendMessage(adminJid, { text: adminMsg });
           }
 
-          return;
-        }
-
-        if (isNegative(clean)) {
-          handoffPendingConfirm.delete(userId);
           await sock.sendMessage(remoteJid, {
-            text: "De una 🙂 entonces seguimos por acá. ¿Qué necesitás saber? 🍓"
+            text: "Perfecto 🙌 ya le pasé tu caso a un humano. Mientras tanto, puedo seguir ayudándote por acá 🙂"
           });
+
           return;
         }
-
-        await sock.sendMessage(remoteJid, {
-          text: "¿Querés que te pase con un humano? Respondé: Sí / No 🙂"
-        });
-        return;
       }
 
       if (clean === "AGENTE" || wantsHuman(clean)) {
@@ -393,8 +261,6 @@ async function start() {
         return;
       }
 
-      await sock.sendPresenceUpdate("composing", remoteJid);
-
       const answer = await agent({
         userId,
         text: clean,
@@ -404,15 +270,11 @@ async function start() {
       });
 
       await sock.sendMessage(remoteJid, { text: answer });
-      await sock.sendPresenceUpdate("available", remoteJid);
+
     } catch (err) {
-      console.error("❌ Error en messages.upsert:", err?.message || err);
-      console.error("🧠 Stack:", err?.stack || "(sin stack)");
+      console.error("❌ Error:", err);
     }
   });
 }
 
-start().catch((e) => {
-  console.error("❌ Fatal:", e?.message || e);
-  console.error("🧠 Stack fatal:", e?.stack || "(sin stack)");
-});
+start();
