@@ -108,22 +108,15 @@ function normalizeCustomerName(raw) {
   return name;
 }
 
-// 🔥 FUNCIÓN MEJORADA (multi-país)
+// 🔥 VALIDACIÓN REAL AQUÍ
 function jidToPhone(jid) {
   const m = (jid || "").match(/^(\d+)@/);
   if (!m) return null;
 
-  let digits = m[1];
+  const digits = m[1];
 
-  // Si ya tiene código país
-  if (digits.length > 8) {
-    return digits;
-  }
-
-  // Si es número local (ej: CR)
-  if (digits.length === 8) {
-    return "506" + digits;
-  }
+  // ❌ descartar IDs raros
+  if (digits.length > 15) return null;
 
   return digits;
 }
@@ -214,15 +207,7 @@ async function start() {
 
       if (!canReply(userId)) return;
 
-      // FIX teléfono correcto
-      let sourceJid;
-      if (remoteJid.endsWith("@g.us")) {
-        sourceJid = msg.key.participant;
-      } else {
-        sourceJid = remoteJid;
-      }
-
-      const clientPhone = jidToPhone(sourceJid);
+      const clientPhone = jidToPhone(userId);
       const clientLink = clientPhone
         ? `https://wa.me/${clientPhone}`
         : null;
@@ -251,8 +236,8 @@ async function start() {
           const adminMsg =
             `🧑‍💼 Solicitud de HUMANO\n` +
             `Cliente: ${customerName}\n` +
-            `Número de teléfono: +${clientPhone}\n` +
-            `Link directo: ${clientLink}\n` +
+            (clientPhone ? `Número de teléfono: +${clientPhone}\n` : "") +
+            (clientLink ? `Link directo: ${clientLink}\n` : "") +
             `\nResumen:\n${summary}`;
 
           for (const adminJid of ADMIN_JIDS) {
