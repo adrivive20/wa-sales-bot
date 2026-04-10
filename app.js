@@ -22,7 +22,6 @@ const RESET_AFTER_MINUTES = process.env.RESET_AFTER_MINUTES
 
 const RESET_AFTER_MS = Math.max(1, RESET_AFTER_MINUTES) * 60 * 1000;
 
-const HUMAN_PHONE_E164 = (process.env.HUMAN_PHONE_E164 ?? "").trim();
 const ADMIN_JIDS = (process.env.ADMIN_JIDS ?? "")
   .split(",")
   .map(s => s.trim())
@@ -37,6 +36,8 @@ const logger = pino({ level: "silent" });
 const memoryStore = new Map();
 const lastSeenStore = new Map();
 const languageStore = new Map();
+
+// 🔥 estado de confirmación humano
 const handoffPendingConfirm = new Set();
 
 const cooldown = new Map();
@@ -77,8 +78,7 @@ function isAffirmative(text) {
     t === "yes" || t === "y" ||
     t.includes("claro") ||
     t.includes("dale") ||
-    t.includes("ok") ||
-    t.includes("de acuerdo")
+    t.includes("ok")
   );
 }
 
@@ -90,39 +90,24 @@ function isNegative(text) {
   );
 }
 
-function normalizeCustomerName(raw) {
-  if (!raw) return null;
-
-  let name = raw
-    .toString()
-    .replace(/[^\p{L}\p{M}\s'.-]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!name) return null;
-  if (name.length > 50) name = name.substring(0, 50).trim();
-  if (/\d/.test(name)) return null;
-
-  return name;
-}
-
-// 🔥 NUEVA extracción correcta del número
+// 🔥 extracción REAL del número (sin IDs raros)
 function extractPhone(msg) {
-  const participant =
+  const id =
     msg.key.participant ||
     msg.key.remoteJid ||
+    msg.key.from ||
     "";
 
-  const match = participant.match(/^(\d+)@/);
+  const match = id.match(/(\d{8,15})/);
   if (!match) return null;
 
   let digits = match[1];
 
-  // Validación básica
-  if (digits.length < 8 || digits.length > 15) return null;
+  // filtrar IDs falsos largos
+  if (digits.length > 12) return null;
 
-  // Normalización CR
-  if (!digits.startsWith("506") && digits.length === 8) {
+  // normalizar CR
+  if (digits.length === 8) {
     digits = "506" + digits;
   }
 
@@ -181,7 +166,7 @@ async function start() {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, qr } = update;
 
     if (qr) {
       console.log("📲 Escaneá este QR:");
@@ -217,30 +202,62 @@ async function start() {
 
       if (!canReply(userId)) return;
 
-      // 🔥 EXTRAER TELÉFONO REAL
-      const clientPhone = extractPhone(msg);
-      const clientLink = toWaLinkFromPhone(clientPhone);
-
+      // 🔥 paso 1: pidió humano
       if (clean === "AGENTE" || wantsHuman(clean)) {
-        const summary = buildConversationSummary(userId);
-
-        const adminMsg =
-          `🧑‍💼 Solicitud de HUMANO\n` +
-          `Contacto: ${clientPhone ?? userId}\n` +
-          (clientLink ? `Link directo: ${clientLink}\n` : "") +
-          `\nResumen:\n${summary}`;
-
-        for (const adminJid of ADMIN_JIDS) {
-          await sock.sendMessage(adminJid, { text: adminMsg });
-        }
+        handoffPendingConfirm.add(userId);
 
         await sock.sendMessage(remoteJid, {
-          text: "Perfecto 🙌 ya le pasé tu caso a un humano 🙂"
+          text: "Claro 🙂 ¿Querés que te pase con un humano? Respondé: Sí / No"
         });
 
         return;
       }
 
+      // 🔥 paso 2: confirmación
+      if (handoffPendingConfirm.has(userId)) {
+
+        if (isAffirmative(clean)) {
+          handoffPendingConfirm.delete(userId);
+
+          const clientPhone = extractPhone(msg);
+          const clientLink = toWaLinkFromPhone(clientPhone);
+          const summary = buildConversationSummary(userId);
+
+          const adminMsg =
+            `🧑‍💼 Solicitud de HUMANO\n` +
+            `Contacto: ${clientPhone ?? "No disponible"}\n` +
+            (clientLink ? `Link directo: ${clientLink}\n` : "") +
+            `\nResumen:\n${summary}`;
+
+          for (const adminJid of ADMIN_JIDS) {
+            await sock.sendMessage(adminJid, { text: adminMsg });
+          }
+
+          await sock.sendMessage(remoteJid, {
+            text: "Perfecto 🙌 ya le pasé tu caso a un humano. Mientras tanto, puedo seguir ayudándote por acá 🙂"
+          });
+
+          return;
+        }
+
+        if (isNegative(clean)) {
+          handoffPendingConfirm.delete(userId);
+
+          await sock.sendMessage(remoteJid, {
+            text: "De una 🙂 seguimos por acá entonces. ¿Qué necesitás saber? 🍓"
+          });
+
+          return;
+        }
+
+        await sock.sendMessage(remoteJid, {
+          text: "¿Querés que te pase con un humano? Respondé: Sí / No 🙂"
+        });
+
+        return;
+      }
+
+      // 🤖 flujo normal
       const answer = await agent({
         userId,
         text: clean,
